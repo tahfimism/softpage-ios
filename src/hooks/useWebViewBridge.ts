@@ -1,6 +1,7 @@
-import { useRef, useCallback, useState } from 'react';
+import { useRef, useCallback, useState, useEffect } from 'react';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import * as FileSystem from 'expo-file-system';
+import { Paths } from 'expo-file-system';
+import { writeAsStringAsync, EncodingType } from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import {
   NativeMessage,
@@ -50,6 +51,7 @@ export function useWebViewBridge(
   const startTimeRef = useRef<number>(0);
   const pendingFilenameRef = useRef<string>('output_recolored.pdf');
   const pendingPagesCountRef = useRef<number>(0);
+  const pdfChunksRef = useRef<string[]>([]);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) {
@@ -65,6 +67,12 @@ export function useWebViewBridge(
       const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
       setProcessing((prev) => ({ ...prev, elapsedSeconds: elapsed }));
     }, 1000);
+  }, [stopTimer]);
+
+  useEffect(() => {
+    return () => {
+      stopTimer();
+    };
   }, [stopTimer]);
 
   const sendCommand = useCallback((cmd: WebViewCommand) => {
@@ -105,17 +113,27 @@ export function useWebViewBridge(
           break;
         }
 
+        case 'EXPORT_CHUNK': {
+          const { chunk } = msg as any;
+          pdfChunksRef.current.push(chunk);
+          break;
+        }
+
         case 'EXPORT_COMPLETE': {
           stopTimer();
-          const { base64Pdf } = msg as any;
 
-          // Write base64 PDF to device temp storage
-          const fileUri =
-            FileSystem.cacheDirectory + pendingFilenameRef.current;
+          // Write base64 PDF chunks to device temp storage
+          const fileUri = `${Paths.cache.uri}${pendingFilenameRef.current}`;
+
           try {
-            await FileSystem.writeAsStringAsync(fileUri, base64Pdf, {
-              encoding: FileSystem.EncodingType.Base64,
+            // Assemble the string locally on JS side. This is better than RN bridge payload issue.
+            // Use legacy writeAsStringAsync which handles Base64 native decoding natively efficiently.
+            const base64Pdf = pdfChunksRef.current.join('');
+
+            await writeAsStringAsync(fileUri, base64Pdf, {
+              encoding: EncodingType.Base64
             });
+
             setProcessing((prev) => ({
               ...prev,
               isProcessing: false,
@@ -125,6 +143,8 @@ export function useWebViewBridge(
           } catch (e: any) {
             onError('Failed to save PDF: ' + e.message);
             setProcessing((prev) => ({ ...prev, isProcessing: false }));
+          } finally {
+            pdfChunksRef.current = [];
           }
           break;
         }
@@ -197,6 +217,7 @@ export function useWebViewBridge(
       isProcessing: false,
       isCancelled: true,
     }));
+    pdfChunksRef.current = [];
   }, [sendCommand, stopTimer]);
 
   const reset = useCallback(() => {
@@ -209,10 +230,11 @@ export function useWebViewBridge(
       elapsedSeconds: 0,
       isCancelled: false,
     });
+    pdfChunksRef.current = [];
   }, []);
 
   return {
-    webViewRef,
+    webViewRef: webViewRef as React.RefObject<WebView>,
     libsReady,
     numPages,
     processing,

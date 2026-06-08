@@ -94,6 +94,7 @@ export type NativeMessageType =
   | 'PDF_LOADED'
   | 'PREVIEW_READY'
   | 'PAGE_PROCESSED'
+  | 'EXPORT_CHUNK'
   | 'EXPORT_COMPLETE'
   | 'EXPORT_CANCELLED'
   | 'ERROR';
@@ -120,9 +121,13 @@ export interface PageProcessedMessage {
   base64Page: string; // base64-encoded PNG blob for this page
 }
 
+export interface ExportChunkMessage {
+  type: 'EXPORT_CHUNK';
+  chunk: string; // base64-encoded PDF chunk
+}
+
 export interface ExportCompleteMessage {
   type: 'EXPORT_COMPLETE';
-  base64Pdf: string; // base64-encoded final PDF
 }
 
 export interface ExportCancelledMessage {
@@ -139,6 +144,7 @@ export type NativeMessage =
   | PdfLoadedMessage
   | PreviewReadyMessage
   | PageProcessedMessage
+  | ExportChunkMessage
   | ExportCompleteMessage
   | ExportCancelledMessage
   | ErrorMessage;
