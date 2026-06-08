@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+import { readAsStringAsync } from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { useRouter } from 'expo-router';
 
@@ -207,10 +207,8 @@ export default function HomeScreen() {
       setIsPreviewLoading(true);
       addToast('info', `Loading "${asset.name}"…`);
 
-      // Use string 'base64' directly — FileSystem.EncodingType may be undefined in SDK 54
-      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
-        encoding: 'base64' as any,
-      });
+      // Read file as Base64 using the legacy API (consistent with useWebViewBridge write)
+      const base64 = await readAsStringAsync(asset.uri, { encoding: 'base64' });
 
       bridge.loadPdf(base64);
     } catch (e: any) {

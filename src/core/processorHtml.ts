@@ -343,16 +343,29 @@ async function exportDocument(pages, settings, palette) {
     }
 
     const pdfBytes  = await newPdf.save();
-    // Convert Uint8Array to base64
-    let binary = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < pdfBytes.length; i += chunkSize) {
-      const chunk = pdfBytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, chunk);
-    }
-    const base64Pdf = btoa(binary);
 
-    postToNative({ type: 'EXPORT_COMPLETE', base64Pdf });
+    // Chunking to avoid "Maximum call stack size exceeded" and OOM via massive string concatenation
+    // Send it in chunks to React Native bridge directly
+    // chunkSize must be a multiple of 3 (65535) to avoid internal Base64 padding characters ('=')
+    const chunkSize = 65535;
+    for (let i = 0; i < pdfBytes.length; i += chunkSize) {
+      if (cancelled) {
+        postToNative({ type: 'EXPORT_CANCELLED' });
+        return;
+      }
+      const chunk = pdfBytes.subarray(i, i + chunkSize);
+
+      // Convert chunk to string via manual loop instead of apply
+      let binaryStr = '';
+      for (let j = 0; j < chunk.length; j++) {
+        binaryStr += String.fromCharCode(chunk[j]);
+      }
+
+      const base64Chunk = btoa(binaryStr);
+      postToNative({ type: 'EXPORT_CHUNK', chunk: base64Chunk });
+    }
+
+    postToNative({ type: 'EXPORT_COMPLETE' });
   } catch(e) {
     postToNative({ type: 'ERROR', message: 'Export failed: ' + e.message });
   }

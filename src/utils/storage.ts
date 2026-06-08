@@ -64,13 +64,16 @@ export async function deleteUserPalette(id: string): Promise<void> {
 export async function saveLastSelectedPalettId(id: string): Promise<void> {
   try {
     await AsyncStorage.setItem(LAST_SETTINGS_KEY + '_palette', id);
-  } catch (_) {}
+  } catch (e) {
+    console.warn('Failed to save last palette ID:', e);
+  }
 }
 
 export async function getLastSelectedPaletteId(): Promise<string | null> {
   try {
     return await AsyncStorage.getItem(LAST_SETTINGS_KEY + '_palette');
-  } catch (_) {
+  } catch (e) {
+    console.warn('Failed to load last palette ID:', e);
     return null;
   }
 }

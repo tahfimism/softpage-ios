@@ -66,7 +66,7 @@ export function ProgressModal({ processing, onCancel }: Props) {
 
           {/* Hint */}
           <Text style={s.hint}>
-            Processing page-by-page to avoid memory issues.
+            Rendering and assembling PDF locally.
           </Text>
 
           {/* Cancel */}
