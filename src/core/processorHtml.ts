@@ -71,21 +71,8 @@ function hexToRgb(hex) {
   };
 }
 
-function applyBrightness(data, amount) {
-  for (let i = 0; i < data.length; i += 4) {
-    data[i]   = Math.max(0, Math.min(255, data[i]   + amount));
-    data[i+1] = Math.max(0, Math.min(255, data[i+1] + amount));
-    data[i+2] = Math.max(0, Math.min(255, data[i+2] + amount));
-  }
-}
-
-function applyContrast(data, factor) {
-  for (let i = 0; i < data.length; i += 4) {
-    data[i]   = Math.max(0, Math.min(255, (data[i]   - 128) * factor + 128));
-    data[i+1] = Math.max(0, Math.min(255, (data[i+1] - 128) * factor + 128));
-    data[i+2] = Math.max(0, Math.min(255, (data[i+2] - 128) * factor + 128));
-  }
-}
+// Endianness check for Uint32Array RGBA/ABGR
+const isLittleEndian = new Uint8Array(new Uint32Array([0x11223344]).buffer)[0] === 0x44;
 
 function detectPhotoBlocks(imageData) {
   const blockSize = 16;
@@ -94,10 +81,11 @@ function detectPhotoBlocks(imageData) {
   const data   = imageData.data;
   const blocksX = Math.ceil(width  / blockSize);
   const blocksY = Math.ceil(height / blockSize);
-  const mask = [];
+
+  // Use a 1D array for the mask to improve cache locality
+  const mask = new Uint8Array(blocksX * blocksY);
 
   for (let by = 0; by < blocksY; by++) {
-    mask[by] = [];
     for (let bx = 0; bx < blocksX; bx++) {
       const startX = bx * blockSize;
       const startY = by * blockSize;
@@ -105,7 +93,8 @@ function detectPhotoBlocks(imageData) {
       const endY   = Math.min(startY + blockSize, height);
 
       let totalSat = 0;
-      const lums = [];
+      let sumLum = 0;
+      let sumSqLum = 0;
       let count = 0;
 
       for (let y = startY; y < endY; y++) {
@@ -115,24 +104,23 @@ function detectPhotoBlocks(imageData) {
           const max = Math.max(r, g, b);
           const min = Math.min(r, g, b);
           totalSat += max === 0 ? 0 : (max - min) / max;
-          lums.push(0.299*r + 0.587*g + 0.114*b);
+
+          const lum = 0.299*r + 0.587*g + 0.114*b;
+          sumLum += lum;
+          sumSqLum += lum * lum;
           count++;
         }
       }
 
       const avgSat  = totalSat / count;
-      const avgLum  = lums.reduce((a,b) => a+b, 0) / lums.length;
-      const variance = lums.reduce((s,l) => s + Math.pow(l - avgLum, 2), 0) / lums.length;
-      mask[by][bx] = avgSat > 0.15 && variance > 500;
+      const avgLum  = sumLum / count;
+      // E[X^2] - (E[X])^2
+      const variance = (sumSqLum / count) - (avgLum * avgLum);
+
+      mask[by * blocksX + bx] = (avgSat > 0.15 && variance > 500) ? 1 : 0;
     }
   }
-  return mask;
-}
-
-function isInPhotoBlock(x, y, mask, blockSize = 16) {
-  const by = Math.floor(y / blockSize);
-  const bx = Math.floor(x / blockSize);
-  return mask[by] && mask[by][bx] !== undefined ? mask[by][bx] : false;
+  return { mask, blocksX, blockSize };
 }
 
 function recolorImageData(imageData, palette, settings) {
@@ -141,55 +129,119 @@ function recolorImageData(imageData, palette, settings) {
   const width  = imageData.width;
   const height = imageData.height;
 
-  // Copy data
-  const srcData = new Uint8ClampedArray(imageData.data);
-
-  if (brightness !== 0) applyBrightness(srcData, brightness);
-  if (contrast !== 1.0)  applyContrast(srcData,   contrast);
-
-  let photoMask = null;
+  let photoMaskInfo = null;
   if (preserveImages) {
-    const tmp = new ImageData(new Uint8ClampedArray(srcData), width, height);
-    photoMask = detectPhotoBlocks(tmp);
+    // Detect photo blocks *before* brightness/contrast to match original behavior
+    photoMaskInfo = detectPhotoBlocks(imageData);
   }
 
   const bgColor = hexToRgb(palette.bg);
   const fgColor = hexToRgb(palette.fg);
   const result  = new ImageData(width, height);
-  const out     = result.data;
 
-  for (let i = 0; i < srcData.length; i += 4) {
-    const r = srcData[i], g = srcData[i+1], b = srcData[i+2], a = srcData[i+3];
+  // Use Uint32Array for much faster pixel processing
+  const src32 = new Uint32Array(imageData.data.buffer);
+  const out32 = new Uint32Array(result.data.buffer);
 
-    if (photoMask) {
-      const pi = i / 4;
-      const px = pi % width;
-      const py = Math.floor(pi / width);
-      if (isInPhotoBlock(px, py, photoMask)) {
-        out[i] = r; out[i+1] = g; out[i+2] = b; out[i+3] = a;
+  const len = src32.length;
+
+  // Pre-calculate fixed background/foreground colors in ABGR (little endian)
+  const bg32 = isLittleEndian
+    ? (255 << 24) | (bgColor.b << 16) | (bgColor.g << 8) | bgColor.r
+    : (bgColor.r << 24) | (bgColor.g << 16) | (bgColor.b << 8) | 255;
+
+  const rBg = bgColor.r, gBg = bgColor.g, bBg = bgColor.b;
+  const rDiff = fgColor.r - bgColor.r;
+  const gDiff = fgColor.g - bgColor.g;
+  const bDiff = fgColor.b - bgColor.b;
+
+  const blocksX = photoMaskInfo ? photoMaskInfo.blocksX : 0;
+  const mask = photoMaskInfo ? photoMaskInfo.mask : null;
+  const blockSize = photoMaskInfo ? photoMaskInfo.blockSize : 16;
+  const invThreshold = 255 - threshold;
+
+  // Single pass optimization
+  for (let i = 0; i < len; i++) {
+    let px = src32[i];
+
+    let r, g, b, a;
+    if (isLittleEndian) {
+      r = px & 0xFF;
+      g = (px >> 8) & 0xFF;
+      b = (px >> 16) & 0xFF;
+      a = (px >> 24) & 0xFF;
+    } else {
+      r = (px >> 24) & 0xFF;
+      g = (px >> 16) & 0xFF;
+      b = (px >> 8) & 0xFF;
+      a = px & 0xFF;
+    }
+
+    if (photoMaskInfo) {
+      const pxX = i % width;
+      const pxY = Math.floor(i / width);
+      const bx = Math.floor(pxX / blockSize);
+      const by = Math.floor(pxY / blockSize);
+      if (mask[by * blocksX + bx] === 1) {
+        // Output unchanged for photo blocks
+        // We apply brightness/contrast *before* skipping photo blocks if they were applied
+        if (brightness !== 0 || contrast !== 1.0) {
+            let r2 = r, g2 = g, b2 = b;
+            if (brightness !== 0) {
+                r2 = Math.max(0, Math.min(255, r2 + brightness));
+                g2 = Math.max(0, Math.min(255, g2 + brightness));
+                b2 = Math.max(0, Math.min(255, b2 + brightness));
+            }
+            if (contrast !== 1.0) {
+                r2 = Math.max(0, Math.min(255, (r2 - 128) * contrast + 128));
+                g2 = Math.max(0, Math.min(255, (g2 - 128) * contrast + 128));
+                b2 = Math.max(0, Math.min(255, (b2 - 128) * contrast + 128));
+            }
+            out32[i] = isLittleEndian
+                ? (a << 24) | (Math.round(b2) << 16) | (Math.round(g2) << 8) | Math.round(r2)
+                : (Math.round(r2) << 24) | (Math.round(g2) << 16) | (Math.round(b2) << 8) | a;
+        } else {
+            out32[i] = px;
+        }
         continue;
       }
     }
 
+    // Apply brightness and contrast in same pass
+    if (brightness !== 0) {
+      r = Math.max(0, Math.min(255, r + brightness));
+      g = Math.max(0, Math.min(255, g + brightness));
+      b = Math.max(0, Math.min(255, b + brightness));
+    }
+    if (contrast !== 1.0) {
+      r = Math.max(0, Math.min(255, (r - 128) * contrast + 128));
+      g = Math.max(0, Math.min(255, (g - 128) * contrast + 128));
+      b = Math.max(0, Math.min(255, (b - 128) * contrast + 128));
+    }
+
     let isBg;
     if (alreadyInverted) {
-      const inv = 255 - threshold;
-      isBg = r <= inv && g <= inv && b <= inv;
+      isBg = r <= invThreshold && g <= invThreshold && b <= invThreshold;
     } else {
       isBg = r >= threshold && g >= threshold && b >= threshold;
     }
 
     if (isBg) {
-      out[i] = bgColor.r; out[i+1] = bgColor.g; out[i+2] = bgColor.b;
+      out32[i] = bg32;
     } else {
       const lum = (r + g + b) / 3;
       let darkness = alreadyInverted ? lum / 255 : 1 - (lum / threshold);
-      darkness = Math.max(0, Math.min(1, darkness));
-      out[i]   = Math.round(bgColor.r + (fgColor.r - bgColor.r) * darkness);
-      out[i+1] = Math.round(bgColor.g + (fgColor.g - bgColor.g) * darkness);
-      out[i+2] = Math.round(bgColor.b + (fgColor.b - bgColor.b) * darkness);
+      if (darkness < 0) darkness = 0;
+      else if (darkness > 1) darkness = 1;
+
+      const outR = Math.round(rBg + rDiff * darkness);
+      const outG = Math.round(gBg + gDiff * darkness);
+      const outB = Math.round(bBg + bDiff * darkness);
+
+      out32[i] = isLittleEndian
+        ? (a << 24) | (outB << 16) | (outG << 8) | outR
+        : (outR << 24) | (outG << 16) | (outB << 8) | a;
     }
-    out[i+3] = a;
   }
   return result;
 }
@@ -320,10 +372,16 @@ async function exportDocument(pages, settings, palette) {
       const recolored = recolorImageData(imgData, palette, settings);
       ctx.putImageData(recolored, 0, 0);
 
-      // Convert canvas to PNG bytes
-      const dataUrl = canvas.toDataURL('image/png');
-      const pngData = dataUrl.split(',')[1];
-      const pngBytes = Uint8Array.from(atob(pngData), c => c.charCodeAt(0));
+      // Convert canvas to PNG bytes efficiently via Blob -> ArrayBuffer
+      const pngBytes = await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (!blob) return reject(new Error('Canvas toBlob failed'));
+          const reader = new FileReader();
+          reader.onload = () => resolve(new Uint8Array(reader.result));
+          reader.onerror = () => reject(new Error('FileReader error'));
+          reader.readAsArrayBuffer(blob);
+        }, 'image/png');
+      });
 
       const img  = await newPdf.embedPng(pngBytes);
       const page = newPdf.addPage([img.width, img.height]);
