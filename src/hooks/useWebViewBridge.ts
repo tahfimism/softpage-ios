@@ -183,7 +183,9 @@ export function useWebViewBridge(
   const renderPreview = useCallback(
     (pageNum: number, settings: Settings, palette: Palette) => {
       if (!libsReady) return;
-      sendCommand({ type: 'RENDER_PREVIEW', pageNum, settings, palette });
+      // Override DPI for faster preview rendering to ensure UI responsiveness
+      const previewSettings = { ...settings, dpi: 72 };
+      sendCommand({ type: 'RENDER_PREVIEW', pageNum, settings: previewSettings, palette });
     },
     [libsReady, sendCommand]
   );
